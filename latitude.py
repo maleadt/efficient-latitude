@@ -20,6 +20,15 @@ import location	# python-location
 # Network connectivity
 import conic
 
+# Google Latitude
+import httplib2
+import pickle
+from apiclient.discovery import build
+from apiclient.oauth import FlowThreeLegged
+from apiclient.ext.authtools import run
+from apiclient.ext.file import Storage
+
+
 # Definitions
 EPS			   = 0.001  # Points within this many degrees are considered "same" and not sent
 UPDATE_AT_MOST	= 1	  # NEVER update more than this (minutes) even when moving
@@ -50,14 +59,54 @@ class Location:
 			  "latitude": self.lat,
 			  "longitude": self.lng,
 			  "accuracy": self.acc,
-			  "timestampMs":self.time*1000, 
-			  "altitude": self.alt,
-			  "altitudeAccuracy": self.altacc,
-			  "heading": self.head,
-			  "speed": self.speed
+			  "timestampMs":int(self.time*1000),
+			  #"altitude": self.alt,
+			  #"altitudeAccuracy": self.altacc,
+			  #"heading": self.head,
+			  #"speed": self.speed
 			  }
 		}
 		return data
+
+class ServiceWrapper:
+	# Member data
+	service = None
+	
+	# Constructor
+	def __init__(self):		
+		# Connect to Latitude
+		storage = Storage('latitude.dat')
+		credentials = storage.get()
+		if credentials is None or credentials.invalid == True:
+			auth_discovery = build("latitude", "v1").auth_discovery()
+			flow = FlowThreeLegged(auth_discovery,
+				# You MUST have a consumer key and secret tied to a
+				# registered domain to use the latitude API.
+				#
+				# https://www.google.com/accounts/ManageDomains
+				consumer_key='maleadt.be',
+				consumer_secret='Yh0qdTQ-pHGQiyguyINr64WK',
+				user_agent='efficient-latitude/0.1',
+				domain='maleadt.be',
+				scope='https://www.googleapis.com/auth/latitude',
+				xoauth_displayname='Efficient Latitude',
+				location='all',
+				granularity='best'
+				)
+			# Work around https://code.google.com/p/google-api-python-client/issues/detail?id=34
+			while len(sys.argv) > 1:
+				sys.argv.pop()
+			credentials = run(flow, storage)
+			if credentials is None or credentials.invalid == True:
+				raise Exception("Invalid Latitude credentials")
+		http = httplib2.Http()
+		http = credentials.authorize(http)
+		self.service = build("latitude", "v1", http=http)
+	
+	# Actions
+	def upload(self,  entries):
+		for entry in entries:
+			self.service.location().insert(body = entry.getData()).execute()
 
 class ConnectionWrapper(gobject.GObject):
 	# Signals
@@ -242,7 +291,7 @@ class PassiveActor(gobject.GObject):
 		else:
 			return
 		
-		# Check if we are online
+		# Check if we are connected
 		global connection
 		if (connection.connected):
 			self.pushCache()
@@ -262,11 +311,11 @@ class PassiveActor(gobject.GObject):
 		if (gps.running):
 			keep_entries = 1
 		
-		if (len(self.cache) > keep_entries):			
-			self.logger.info("Pushing entries towards Google")
-			while (len(self.cache) > keep_entries):
-				entry = self.cache.pop(0)
-				self.logger.debug(entry)
+		if (len(self.cache) > keep_entries):
+			self.logger.info("Uploading entries")
+			global service
+			service.upload(self.cache[keep_entries:])
+			del self.cache[keep_entries:]
 			self.emit("push")
 		
 		return False
@@ -314,9 +363,7 @@ def actor_passive():
 # Application handling
 #
 
-def init():
-	loop = gobject.MainLoop()
-	
+def init():	
 	# Configure the GPS wrapper
 	global gps
 	gps = GPSWrapper()
@@ -324,6 +371,10 @@ def init():
 	# Configure the connection wrapper
 	global connection
 	connection = ConnectionWrapper()
+	
+	# Configure the service wrapper
+	global service
+	service = ServiceWrapper()
 	
 	# Install the passive actor
 	global actor_passive
@@ -334,8 +385,6 @@ def init():
 	actor_active = ActiveActor()
 	gobject.timeout_add(GPS_INTERVAL * 60000, actor_active.update)
 	gobject.idle_add(actor_active.update)
-	
-	loop.run()
 
 def daemonize():
 	pid = os.fork()
@@ -359,12 +408,14 @@ def main(args):
 		logging.basicConfig(level=logging.DEBUG)
 	else:
 		logging.basicConfig(level=logging.INFO)
-	if args.daemonize:
-		logging.info('Forking into the background')
-		daemonize()
 	
 	logging.info('Initializing application')
 	init()
+	
+	if args.daemonize:
+		logging.info('Forking into the background')
+		daemonize()
+	gobject.MainLoop().run()
 
 
 parser = argparse.ArgumentParser(description='Intelligent Google Latitude updater.')
