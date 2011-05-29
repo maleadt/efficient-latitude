@@ -13,6 +13,10 @@ import os
 import sys
 import logging
 import signal
+import subprocess
+import re
+import socket
+import httplib
 
 # Geolocation
 import location    # python-location
@@ -144,6 +148,68 @@ class ConnectionWrapper(gobject.GObject):
             self.connected = False
             self.emit("disconnected")
 
+class Skyhook():
+    # Member data    
+    logger = logging.getLogger('Skyhook')
+    
+    # Constructor
+    def __init__(self, bssid):
+        self.apihost="api.skyhookwireless.com"
+        self.url="/wps2/location"
+        self.bssid=self._validateBssid(bssid)
+        self.results={}
+        self.reqStr = """<?xml version='1.0'?>
+            <LocationRQ xmlns='http://skyhookwireless.com/wps/2005' version='2.6' street-address-lookup='full'>
+              <authentication version='2.0'>
+                <simple>skyhook
+                  <username>beta</username>
+                  <realm>js.loki.com</realm>
+                </simple>
+              </authentication>
+              <access-point>
+                <mac>%s</mac>
+                <signal-strength>-50</signal-strength>
+              </access-point>
+            </LocationRQ>""" % self.bssid
+
+    def _validateBssid(self, bssid):
+        if not re.compile(r"^([\dabcdef]{2}:){5}[\dabcdef]{2}$", re.I).search(bssid):
+            raise Exception("BSSID [%s] does not appear to be valid" % bssid)
+        bssid = bssid.replace(":", "").upper()
+        return bssid
+
+    def _parseResponse(self, xml):
+        print xml
+        match = re.compile(r"<latitude>([^<]*)</latitude><longitude>([^<]*)</longitude>").search(xml)
+        if match:
+            self.results["Latitude"] = match.group(1)
+            self.results["Longitude"] = match.group(2)
+        else:
+            raise Exception("Couldn't find basic attributes in response..")
+
+    def getLocation(self):
+        try:
+            dataLen=len(self.reqStr)
+            conn = httplib.HTTPSConnection(self.apihost)
+            conn.putrequest("POST", self.url)
+            conn.putheader("Content-type", "text/xml")
+            conn.putheader("Content-Length", str(dataLen))
+            conn.endheaders()
+            conn.send(self.reqStr)
+        except (socket.gaierror, socket.error):
+            raise Exception("There was a problem when connecting to host [%s]" % (self.apihost))
+
+        response = conn.getresponse()
+        if response.status != 200:
+            raise Exception("There was an error from the sever: [%s %s]" % (response.status, response.reason))
+
+        xml = response.read()
+        if re.compile(r"Unable to locate").search(xml):
+            raise Exception("Unable to find info for [%s]" % bssid)
+
+        self._parseResponse(xml)
+        return self.results
+
 class GPSWrapper(gobject.GObject):
     # Signals
     __gsignals__ = {
@@ -182,6 +248,8 @@ class GPSWrapper(gobject.GObject):
         self.control.connect("gpsd-stopped", self.onStop)
         self.control.connect("error-verbose", self.onError)
         self.device.connect("changed", self.onChanged)
+        
+        self._getWIFI()
     
     # Events
     def onStart(self,  control):
@@ -282,6 +350,26 @@ class GPSWrapper(gobject.GObject):
             else:
                 self.control.set_properties(preferred_method = location.METHOD_GNSS)
             self.control.start()
+        elif (source == self.Source.WIFI):
+            addresses = self._getWIFI()
+            emits = 0
+            if (aid == self.Aid.INTERNET):
+                for address in addresses:
+                    skyhook = Skyhook(address)
+                    try:
+                        result = skyhook.getLocation()
+                        newLocation = Location()
+                        newLocation.lat = result["Latitude"]
+                        newLocation.lng = result["Longitude"]
+                        newLocation.accuracy = 10
+                        self.emit("fix", newLocation)
+                        emits = emits + 1
+                    except Exception, err:
+                        self.logger.error("Could not lookup over WIFI: %s", str(err))
+                        pass
+            if emits == 0:
+                self.emit("nofix")
+                
     def stop(self):
         self.owned = False
         
@@ -291,9 +379,17 @@ class GPSWrapper(gobject.GObject):
             self.control.stop()
     
     # Auxiliary
-    def _getMac(self):
-        gl = os.popen('cat /sys/class/ieee80211/phy0/macaddress').read()
-        return gl.strip()
+    def _getWIFI(self):
+        proc = subprocess.Popen('iwlist scan 2>/dev/null', shell=True, stdout=subprocess.PIPE, )
+        stdout_str = proc.communicate()[0]
+        stdout_list=stdout_str.split('\n')
+        address=[]
+        for line in stdout_list:
+            line=line.strip()
+            match=re.search('Address: (\S+)',line)
+            if match:
+                address.append(match.group(1)) 
+        return address
 
 class Actor:
     # Member data
@@ -346,7 +442,7 @@ class Actor:
         self.logger.info("Enabling GPS")
         global gps
         if (not gps.running):
-            gps.start(GPSWrapper.Source.GSM, GPSWrapper.Aid.INTERNET)
+            gps.start(GPSWrapper.Source.WIFI, GPSWrapper.Aid.INTERNET)
         
         # TODO: handle timeouts
         
