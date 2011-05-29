@@ -146,6 +146,10 @@ class ConnectionWrapper(gobject.GObject):
             self.logger.debug("Device disconnected from %s" % bearer)
             self.connected = False
             self.emit("disconnected")
+    
+    # Actions
+    def request(self):
+        self.connection.request_connection(conic.CONNECT_FLAG_NONE)
 
 class Skyhook():
     # Member data    
@@ -399,6 +403,7 @@ class Actor:
         UPDATING_WIFI = 1
         UPDATING_GSM = 2
         UPDATING_GPS = 3
+        CONNECTING = 4
     
     # Member data
     logger = logging.getLogger('Actor')
@@ -412,7 +417,6 @@ class Actor:
         global gps
         gps.connect("fix",  self.onFix)
         gps.connect("nofix", self.onNoFix)
-        gps.connect("stop", self.onStop)
         
         # Listen for connection events
         global connection
@@ -428,49 +432,16 @@ class Actor:
         elif (self.cache[-1].acc > location.acc):
             self.cache[-1] = location
         else:
-            return
+            return  # TODO: this can break cell update. always schedule timeout?
         
-        if self.state == self.State.UPDATING_WIFI:
-            self.logger.info("WIFI lookup succeeded")
-            gps.stop()
-            self.state = self.State.IDLE
-        elif self.state == self.State.UPDATING_GSM:
-            self.logger.info("GSM lookup succeeded")
-            gps.stop()
-            self.state = self.State.IDLE
-        elif self.state == self.State.UPDATING_GPS:
-            self.logger.info("GPS lookup succeeded")
-            gps.stop()
-            self.state = self.State.IDLE
-            gobject.source_remove(self.timeout)
+        self._success()
     def onNoFix(self, gps):
-        if self.state == self.State.UPDATING_WIFI:
-            self.logger.info("WIFI lookup failed")
-            gps.stop()
-            
-            self.logger.info("Attempting GSM lookup")
-            self.state = self.State.UPDATING_GSM
-            gps.start(GPSWrapper.Source.GSM, GPSWrapper.Aid.INTERNET)
-        elif self.state == self.State.UPDATING_GSM:
-            self.logger.info("GSM lookup failed")
-            gps.stop()
-            
-            self.logger.info("Attempting GPS lookup")
-            self.state = self.State.UPDATING_GPS
-            gps.start(GPSWrapper.Source.GPS, GPSWrapper.Aid.INTERNET)
-            timeout = gobject.timeout_add(TIMEOUT_GPS * 1000, self.onNoFix, gps)
-        elif self.state == self.State.UPDATING_GPS:
-            self.logger.info("GPS lookup failed")
-            gps.stop()
-            self.state = self.State.IDLE
+        self._failure()
         
         return False
-    def onStop(self,  gps):
-        self.pushCache()
     def onConnected(self,  connection):
         self.logger.debug("Device is now connected")
-        self.pushCache()
-        return
+        self._success()
     
     # Update method
     def updateFirst(self):
@@ -479,11 +450,14 @@ class Actor:
     def update(self):
         self.logger.info("Updating the location")
         
-        global gps
-        if not gps.running:
-            self.logger.info("Attempting WIFI lookup")
-            self.state = self.State.UPDATING_WIFI
-            gps.start(GPSWrapper.Source.WIFI, GPSWrapper.Aid.INTERNET)
+        global connection
+        self.state = self.State.CONNECTING
+        if not connection.connected:
+            self.logger.info("Connecting")
+            connection.request()
+            self.timeout = gobject.timeout_add(TIMEOUT_GPS * 1000, self._timeout)
+        else:
+            self._success()
         
         return True
     
@@ -502,7 +476,72 @@ class Actor:
             del self.cache[keep_entries:]
         
         return False
-
+    
+    # State machine
+    def _failure(self):
+        global gps, connection
+        
+        if self.state == self.State.CONNECTING:
+            self.logger.info("Failed to connect")
+            self.state = self.State.IDLE
+        elif self.state == self.State.UPDATING_WIFI:
+            self.logger.info("WIFI lookup failed")
+            gps.stop()
+            
+            self.logger.info("Attempting GSM lookup")
+            self.state = self.State.UPDATING_GSM
+            gps.start(GPSWrapper.Source.GSM, GPSWrapper.Aid.INTERNET)
+        elif self.state == self.State.UPDATING_GSM:
+            self.logger.info("GSM lookup failed")
+            gps.stop()
+            
+            self.logger.info("Attempting GPS lookup")
+            self.state = self.State.UPDATING_GPS
+            gps.start(GPSWrapper.Source.GPS, GPSWrapper.Aid.INTERNET)
+            self.timeout = gobject.timeout_add(TIMEOUT_GPS * 1000, self._timeout)
+        elif self.state == self.State.UPDATING_GPS:
+            self.logger.info("GPS lookup failed")
+            gps.stop()
+            self.state = self.State.IDLE
+    def _success(self):
+        global gps, connection
+        
+        if self.state == self.State.CONNECTING:
+            self.logger.info("Successfully connected")
+            if self.timeout != None:
+                gobject.source_remove(self.timeout)
+            self.timeout = None
+            
+            self.logger.info("Attempting WIFI lookup")
+            self.state = self.State.UPDATING_WIFI
+            gps.start(GPSWrapper.Source.WIFI, GPSWrapper.Aid.INTERNET)
+        elif self.state == self.State.UPDATING_WIFI:
+            self.logger.info("WIFI lookup succeeded")
+            gps.stop()
+            
+            self.pushCache()
+            
+            self.state = self.State.IDLE
+        elif self.state == self.State.UPDATING_GSM:
+            self.logger.info("GSM lookup succeeded")
+            gps.stop()
+            
+            self.pushCache()
+            
+            self.state = self.State.IDLE
+        elif self.state == self.State.UPDATING_GPS:
+            self.logger.info("GPS lookup succeeded")
+            gps.stop()
+            if self.timeout != None:
+                gobject.source_remove(self.timeout)
+            self.timeout = None
+            
+            self.pushCache()
+            
+            self.state = self.State.IDLE
+    def _timeout(self):
+        self.logger.info("Timeout hit")
+        self._failure()
 
 #
 # Application handling
