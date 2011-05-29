@@ -70,6 +70,7 @@ class Location:
 
 class ServiceWrapper:
     # Member data
+    logger = logging.getLogger('ServiceWrapper')
     service = None
     
     # Constructor
@@ -106,6 +107,7 @@ class ServiceWrapper:
     # Actions
     def upload(self,  entries):
         for entry in entries:
+            self.logger.debug(entry.getData())
             self.service.location().insert(body = entry.getData()).execute()
 
 class ConnectionWrapper(gobject.GObject):
@@ -202,14 +204,15 @@ class GPSWrapper(gobject.GObject):
                     self.onStart(self.control);    
                     
         # Process the changeset
-        self.process(device.fix[0], device.fix[4], device.fix[5], device.fix[6]/1000, device.fix[7], device.fix[8], device.fix[9], device.fix[11])
+        self.process(device.fix[0], device.fix[4], device.fix[5], device.fix[6]/100, device.fix[7], device.fix[8], device.fix[9], device.fix[11])
     
     # Location handling
-    def process(self, mode, lat, lng, acc, alt, altacc, head, speed):        
+    def process(self, mode, lat, lng, acc, alt, altacc, head, speed):
+        self.logger.debug("Received raw location data mode %d (attempt %d): lat=%f, lon=%f (accuracy of %f) alt=%f (accuracy of %f), head=%f, speed=%f" % (mode, self.fix_tries, lat, lng, acc, alt, altacc, head, speed))
+        
         # Ignore cached or country-size measurements
         if mode < 2:
             return
-        self.logger.debug("Received raw location data mode %d (attempt %d): lat=%f, lon=%f (accuracy of %f) alt=%f (accuracy of %f), head=%f, speed=%f" % (mode, self.fix_tries, lat, lng, acc, alt, altacc, head, speed))
 
         # Skip the NaN's in accuracy
         if acc != acc:
