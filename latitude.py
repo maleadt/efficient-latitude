@@ -7,13 +7,16 @@
 # System modules
 import argparse    # python-argparse
 import gobject
-import pickle
 import time
 import os
 import sys
 import logging
 import signal
+
+# WIFI scanning
 import subprocess
+
+# Skyhook
 import re
 import socket
 import httplib
@@ -27,11 +30,10 @@ import conic
 # Google Latitude
 import httplib2
 import pickle
-from apiclient.discovery import build
+from apiclient.discovery import build   # google-api-python-client
 from apiclient.oauth import FlowThreeLegged
 from apiclient.ext.authtools import run
 from apiclient.ext.file import Storage
-
 
 # Definitions
 UPDATE_AT_MOST    = 1      # NEVER update more than this (minutes) even when moving
@@ -39,6 +41,7 @@ UPDATE_AT_LEAST   = 15     # NEVER update LESS than this (minutes) even when sti
 TIMEOUT_GPS       = 30     # How long we are allowed to look for a GPS fix
 MIN_ACCURACY_GSM  = 2500   # The minimal accuracy of a cell fix to be accepted
 MIN_ACCURACY_GPS  = 150    # The minimal accuracy of a gps fix to be accepted
+
 
 #
 # Auxiliary
