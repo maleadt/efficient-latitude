@@ -148,6 +148,7 @@ class GPSWrapper(gobject.GObject):
     # Signals
     __gsignals__ = {
         "fix": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, (object, )),
+        "nofix": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, ()),
         "start": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, ()),
         "stop": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, ()),
     }
@@ -156,6 +157,7 @@ class GPSWrapper(gobject.GObject):
     class Source:
         GSM=1
         GPS=2
+        WIFI=3
     class Aid:
         NONE=1
         INTERNET=2
@@ -167,6 +169,8 @@ class GPSWrapper(gobject.GObject):
     fix_tries = 0
     running = False
     owned = False
+    source = None
+    aid = None
     location_current = Location()
     location_previous = Location()
     
@@ -201,45 +205,27 @@ class GPSWrapper(gobject.GObject):
             else:
                 if (not self.running):
                     self.logger.debug("External GPSD start")
-                    self.onStart(self.control);    
-                    
-        # Process the changeset
-        self.process(device.fix[0], device.fix[4], device.fix[5], device.fix[6]/100, device.fix[7], device.fix[8], device.fix[9], device.fix[11])
-    
-    # Location handling
-    def process(self, mode, lat, lng, acc, alt, altacc, head, speed):
-        self.logger.debug("Received raw location data mode %d (attempt %d): lat=%f, lon=%f (accuracy of %f) alt=%f (accuracy of %f), head=%f, speed=%f" % (mode, self.fix_tries, lat, lng, acc, alt, altacc, head, speed))
-        
-        # Ignore cached or country-size measurements
-        if mode < 2:
-            return
-
-        # Skip the NaN's in accuracy
-        if acc != acc:
-            return False            
-        
-        if (lat == 0 or lng == 0):
-            return
+                    self.onStart(self.control);
         
         # Generate a location
+        mode = device.fix[0]
         newLocation = Location()
         newLocation.time = time.time()
-        newLocation.lat = lat
-        newLocation.lng = lng
-        newLocation.acc = acc
-        newLocation.alt = alt
-        newLocation.altacc = altacc
-        newLocation.head = head
-        newLocation.speed = speed
-        
-        # Process appropriately
+        newLocation.lat = device.fix[4]
+        newLocation.lng = device.fix[5]
+        newLocation.acc = device.fix[6]/100
+        newLocation.alt = device.fix[7]
+        newLocation.altacc = device.fix[8]
+        newLocation.head = device.fix[9]
+        newLocation.speed = device.fix[11]
+        self.logger.debug("Received raw location data mode %d (attempt %d): lat=%f, lon=%f (accuracy of %f) alt=%f (accuracy of %f), head=%f, speed=%f" % (mode, self.fix_tries, newLocation.lat, newLocation.lng, newLocation.acc, newLocation.alt, newLocation.altacc, newLocation.head, newLocation.speed))
+                    
+        # Process the changeset
         valid = False
-        if self.control.get_property("preferred_method") == location.METHOD_GNSS or self.control.get_property("preferred_method") == location.METHOD_AGNSS:
-                valid = self.processGPS(newLocation)
-        elif self.control.get_property("preferred_method") == location.METHOD_CWP or self.control.get_property("preferred_method") == location.METHOD_ACWP:
-                valid = self.processGSM(newLocation)
-        
-        # Send a signal if the changeset is a valid one
+        if self.source == self.Source.GPS:
+            valid = self.processGPS(mode, newLocation)
+        elif self.source == self.Source.GSM:
+            valid = self.processGSM(mode, newLocation)
         if valid:
             # Save and buffer the location
             self.location_previous = self.location_current
@@ -247,7 +233,16 @@ class GPSWrapper(gobject.GObject):
             
             self.logger.debug("Emitting GPS fix")
             self.emit("fix", newLocation)
-    def processGPS(self,  newLocation):
+    
+    def processGPS(self,  mode, newLocation):
+        # Ignore cached or country-size measurements
+        if mode < 2:
+            return False
+
+        # Skip the NaN's in accuracy
+        if acc != acc:
+            return False
+            
         # I don't care about data of low accuracy, let's wait for a new fix
         if newLocation.acc > 150:
             return False
@@ -260,31 +255,45 @@ class GPSWrapper(gobject.GObject):
         self.fix_tries += 1
         if mode < 3 and self.fix_tries < 3:
             return False
-        self.fix_tries = 0
-        
+        self.fix_tries = 0        
         return True
-    def processGSM(self, newLocation):
+    def processGSM(self, mode, newLocation):
+        # Ignore cached or country-size measurements
+        if mode < 2:
+            return False
+        
         return True
     
     # Actions
-    def start(self):
-        self.owned = True        
-        self.control.set_properties(preferred_method = location.METHOD_ACWP)
-        self.control.start()
-    def stop(self):
-        self.owned = False
-        self.control.stop()
-    def setMode(self, source, aid):
+    def start(self, source, aid):
+        self.owned = True
+        self.source = source
+        self.aid = aid
+        
         if (source == self.Source.GSM):
             if (aid == self.Aid.INTERNET):
                 self.control.set_properties(preferred_method = location.METHOD_ACWP)
             else:
                 self.control.set_properties(preferred_method = location.METHOD_CWP)
+            self.control.start()
         elif (source == self.Source.GPS):
             if (aid == self.Aid.INTERNET):
                 self.control.set_properties(preferred_method = location.METHOD_AGNSS)
             else:
                 self.control.set_properties(preferred_method = location.METHOD_GNSS)
+            self.control.start()
+    def stop(self):
+        self.owned = False
+        
+        if (self.source == self.Source.GSM):
+            self.control.stop()
+        if (self.source == self.Source.GPS):
+            self.control.stop()
+    
+    # Auxiliary
+    def _getMac(self):
+        gl = os.popen('cat /sys/class/ieee80211/phy0/macaddress').read()
+        return gl.strip()
 
 class Actor:
     # Member data
@@ -296,6 +305,7 @@ class Actor:
         # Listen for GPS events
         global gps
         gps.connect("fix",  self.onFix)
+        gps.connect("nofix", self.onNoFix)
         gps.connect("stop", self.onStop)
         
         # Listen for connection events
@@ -317,6 +327,8 @@ class Actor:
         if (gps.owned):
             self.logger.debug("Disabling GPS")
             gps.stop()
+    def onNoFix(self, gps):
+        self.logger.debug("Location lookup cut short")
     def onStop(self,  gps):
         self.pushCache()
     def onConnected(self,  connection):
@@ -334,8 +346,7 @@ class Actor:
         self.logger.info("Enabling GPS")
         global gps
         if (not gps.running):
-            gps.setMode(GPSWrapper.Source.GSM, GPSWrapper.Aid.INTERNET)
-            gps.start()
+            gps.start(GPSWrapper.Source.GSM, GPSWrapper.Aid.INTERNET)
         
         # TODO: handle timeouts
         
