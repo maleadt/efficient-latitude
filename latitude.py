@@ -109,7 +109,7 @@ class ServiceWrapper:
         self.service = build("latitude", "v1", http=http)
     
     # Actions
-    def upload(self,  entries):
+    def upload(self, entries):
         for entry in entries:
             self.service.location().insert(body = entry.getData()).execute()
 
@@ -134,7 +134,7 @@ class ConnectionWrapper(gobject.GObject):
         self.connection.set_property("automatic-connection-events", True)
     
     # Events
-    def on_connection_event(self,  connection, event):    
+    def on_connection_event(self, connection, event):    
         status = event.get_status()
         bearer = event.get_bearer_type()
         
@@ -252,17 +252,17 @@ class GPSWrapper(gobject.GObject):
         self._getWIFI()
     
     # Events
-    def onStart(self,  control):
+    def onStart(self, control):
         self.logger.debug("Control started")
         self.running = True
         self.emit("start")
-    def onStop(self,  control):
+    def onStop(self, control):
         self.logger.debug("Control stopped")
         self.running = False
         self.emit("stop")
-    def onError(self,  control, error):
+    def onError(self, control, error):
         self.logger.error("GPS error: %d" % error)
-    def onChanged(self,  device):        
+    def onChanged(self, device):        
         # If we don't start the control, we also don't get the signals. So use the fix
         # to determine whether the device is still running)
         if (not self.owned):
@@ -300,7 +300,7 @@ class GPSWrapper(gobject.GObject):
             self.logger.debug("Emitting GPS fix")
             self.emit("fix", newLocation)
     
-    def processGPS(self,  mode, newLocation):
+    def processGPS(self, mode, newLocation):
         # Ignore cached or country-size measurements
         if mode < 2:
             return False
@@ -415,20 +415,20 @@ class Actor:
     def __init__(self):        
         # Listen for GPS events
         global gps
-        gps.connect("fix",  self.onFix)
+        gps.connect("fix", self.onFix)
         gps.connect("nofix", self.onNoFix)
         
         # Listen for connection events
         global connection
-        connection.connect("connected",  self.onConnected)
+        connection.connect("connected", self.onConnected)
     
     # Events
-    def onFix(self,  gps,  location):
+    def onFix(self, gps, location):
         # Fill the cache
         if (len(self.cache) == 0):
             self.cache.append(location)
         elif (time.time()  - self.cache[-1].time > UPDATE_AT_MOST * 60):
-            cache.append(location)
+            self.cache.append(location)
         elif (self.cache[-1].acc > location.acc):
             self.cache[-1] = location
         else:
@@ -439,7 +439,7 @@ class Actor:
         self._failure()
         
         return False
-    def onConnected(self,  connection):
+    def onConnected(self, connection):
         self.logger.debug("Device is now connected")
         self._success()
     
