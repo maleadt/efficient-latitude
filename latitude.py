@@ -584,18 +584,27 @@ def daemonize():
     os.close(1);
     os.close(2);
 
-def main(args):    
+def main(args):
+    # Configure logging
+    rootlogger = logging.getLogger()
+    filehandler = logging.FileHandler('/var/log/efficient-latitude.log')
+    filehandler.setFormatter(logging.Formatter('%(name)s:%(levelname)s %(module)s:%(lineno)d:  %(message)s'))
+    rootlogger.addHandler(filehandler)
+    streamhandler = logging.StreamHandler()
+    streamhandler.setFormatter(logging.Formatter('%(levelname)-10s %(message)s'))
+    rootlogger.addHandler(streamhandler)
+    
     # Process command-line arguments
     if args.verbose:
-        logging.basicConfig(level=logging.DEBUG)
+        rootlogger.setLevel(logging.DEBUG)
     else:
-        logging.basicConfig(level=logging.INFO)
+        rootlogger.setLevel(logging.INFO)
     
-    logging.info('Initializing application')
+    rootlogger.info('Initializing application')
     init()
     
     if args.daemonize:
-        logging.info('Forking into the background')
+        rootlogger.info('Forking into the background')
         daemonize()
     gobject.MainLoop().run()
 
