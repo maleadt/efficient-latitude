@@ -34,11 +34,11 @@ from apiclient.ext.file import Storage
 
 
 # Definitions
-EPS               = 0.001  # Points within this many degrees are considered "same" and not sent
 UPDATE_AT_MOST    = 1      # NEVER update more than this (minutes) even when moving
-UPDATE_AT_LEAST   = 60     # NEVER update LESS than this (minutes) even when still (to avoid "stale points" in Latitude)
-GPS_INTERVAL      = 5      # How often to "awaken" the GPS (minutes)
-
+UPDATE_AT_LEAST   = 15     # NEVER update LESS than this (minutes) even when still (to avoid "stale points" in Latitude)
+TIMEOUT_GPS       = 30     # How long we are allowed to look for a GPS fix
+MIN_ACCURACY_GSM  = 2500   # The minimal accuracy of a cell fix to be accepted
+MIN_ACCURACY_GPS  = 150    # The minimal accuracy of a gps fix to be accepted
 
 #
 # Auxiliary
@@ -111,7 +111,6 @@ class ServiceWrapper:
     # Actions
     def upload(self,  entries):
         for entry in entries:
-            self.logger.debug(entry.getData())
             self.service.location().insert(body = entry.getData()).execute()
 
 class ConnectionWrapper(gobject.GObject):
@@ -179,13 +178,12 @@ class Skyhook():
         return bssid
 
     def _parseResponse(self, xml):
-        print xml
         match = re.compile(r"<latitude>([^<]*)</latitude><longitude>([^<]*)</longitude>").search(xml)
         if match:
             self.results["Latitude"] = match.group(1)
             self.results["Longitude"] = match.group(2)
         else:
-            raise Exception("Couldn't find basic attributes in response..")
+            raise Exception("Couldn't find basic attributes in response.")
 
     def getLocation(self):
         try:
@@ -237,8 +235,6 @@ class GPSWrapper(gobject.GObject):
     owned = False
     source = None
     aid = None
-    location_current = Location()
-    location_previous = Location()
     
     # Constructor
     def __init__(self):
@@ -294,11 +290,9 @@ class GPSWrapper(gobject.GObject):
             valid = self.processGPS(mode, newLocation)
         elif self.source == self.Source.GSM:
             valid = self.processGSM(mode, newLocation)
-        if valid:
-            # Save and buffer the location
-            self.location_previous = self.location_current
-            self.location_current = newLocation
-            
+            if not valid:
+                self.emit("nofix")  # we can only get a single GSM fix, if it isn't valid, we won't get one... ever
+        if valid:            
             self.logger.debug("Emitting GPS fix")
             self.emit("fix", newLocation)
     
@@ -308,11 +302,11 @@ class GPSWrapper(gobject.GObject):
             return False
 
         # Skip the NaN's in accuracy
-        if acc != acc:
+        if newLocation.acc != newLocation.acc:
             return False
             
         # I don't care about data of low accuracy, let's wait for a new fix
-        if newLocation.acc > 150:
+        if newLocation.acc > MIN_ACCURACY_GPS:
             return False
         
         # Manage invalid alttiude accuracy
@@ -328,6 +322,10 @@ class GPSWrapper(gobject.GObject):
     def processGSM(self, mode, newLocation):
         # Ignore cached or country-size measurements
         if mode < 2:
+            return False
+            
+        # I don't care about data of very low accuracy
+        if newLocation.acc > MIN_ACCURACY_GSM:
             return False
         
         return True
@@ -367,6 +365,9 @@ class GPSWrapper(gobject.GObject):
                     except Exception, err:
                         self.logger.error("Could not lookup over WIFI: %s", str(err))
                         pass
+            else:
+                self.logger.error("Offline WIFI lookup not implemented yet")
+                # TODO: implement this
             if emits == 0:
                 self.emit("nofix")
                 
@@ -392,9 +393,18 @@ class GPSWrapper(gobject.GObject):
         return address
 
 class Actor:
+    # Auxiliary
+    class State:
+        IDLE = 0
+        UPDATING_WIFI = 1
+        UPDATING_GSM = 2
+        UPDATING_GPS = 3
+    
     # Member data
     logger = logging.getLogger('Actor')
     cache = []
+    state = State.IDLE
+    timeout = None
     
     # Constructor
     def __init__(self):        
@@ -420,11 +430,41 @@ class Actor:
         else:
             return
         
-        if (gps.owned):
-            self.logger.debug("Disabling GPS")
+        if self.state == self.State.UPDATING_WIFI:
+            self.logger.info("WIFI lookup succeeded")
             gps.stop()
+            self.state = self.State.IDLE
+        elif self.state == self.State.UPDATING_GSM:
+            self.logger.info("GSM lookup succeeded")
+            gps.stop()
+            self.state = self.State.IDLE
+        elif self.state == self.State.UPDATING_GPS:
+            self.logger.info("GPS lookup succeeded")
+            gps.stop()
+            self.state = self.State.IDLE
+            gobject.source_remove(self.timeout)
     def onNoFix(self, gps):
-        self.logger.debug("Location lookup cut short")
+        if self.state == self.State.UPDATING_WIFI:
+            self.logger.info("WIFI lookup failed")
+            gps.stop()
+            
+            self.logger.info("Attempting GSM lookup")
+            self.state = self.State.UPDATING_GSM
+            gps.start(GPSWrapper.Source.GSM, GPSWrapper.Aid.INTERNET)
+        elif self.state == self.State.UPDATING_GSM:
+            self.logger.info("GSM lookup failed")
+            gps.stop()
+            
+            self.logger.info("Attempting GPS lookup")
+            self.state = self.State.UPDATING_GPS
+            gps.start(GPSWrapper.Source.GPS, GPSWrapper.Aid.INTERNET)
+            timeout = gobject.timeout_add(TIMEOUT_GPS * 1000, self.onNoFix, gps)
+        elif self.state == self.State.UPDATING_GPS:
+            self.logger.info("GPS lookup failed")
+            gps.stop()
+            self.state = self.State.IDLE
+        
+        return False
     def onStop(self,  gps):
         self.pushCache()
     def onConnected(self,  connection):
@@ -439,12 +479,11 @@ class Actor:
     def update(self):
         self.logger.info("Updating the location")
         
-        self.logger.info("Enabling GPS")
         global gps
-        if (not gps.running):
+        if not gps.running:
+            self.logger.info("Attempting WIFI lookup")
+            self.state = self.State.UPDATING_WIFI
             gps.start(GPSWrapper.Source.WIFI, GPSWrapper.Aid.INTERNET)
-        
-        # TODO: handle timeouts
         
         return True
     
@@ -463,14 +502,6 @@ class Actor:
             del self.cache[keep_entries:]
         
         return False
-
-#
-# Actors
-#
-
-def actor_passive():
-    print "boo"
-    logging.info("Passively looking for a fix")
 
 
 #
@@ -495,7 +526,7 @@ def init():
     actor = Actor()
     
     # Schedule updates
-    gobject.timeout_add(GPS_INTERVAL * 60000, actor.update)
+    gobject.timeout_add(UPDATE_AT_LEAST * 60000, actor.update)
     gobject.idle_add(actor.updateFirst)
 
 def daemonize():
