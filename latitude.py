@@ -41,7 +41,9 @@ import osso
 # Definitions
 UPDATE_AT_MOST    = 1      # NEVER update more than this (minutes) even when moving
 UPDATE_AT_LEAST   = 15     # NEVER update LESS than this (minutes) even when still (to avoid "stale points" in Latitude)
-TIMEOUT_GPS       = 30     # How long we are allowed to look for a GPS fix
+TIMEOUT_CONN      = 10     # How long we are allowed to wait for a connection
+TIMEOUT_GPS       = 30     # How long we are allowed to wait for a GPS fix
+TIMEOUT_GSM       = 10     # How lone we are allowed to wait for a GSM fix
 MIN_ACCURACY_GSM  = 2500   # The minimal accuracy of a cell fix to be accepted
 MIN_ACCURACY_GPS  = 150    # The minimal accuracy of a gps fix to be accepted
 
@@ -321,8 +323,10 @@ class GPSWrapper(gobject.GObject):
             valid = self.processGPS(mode, newLocation)
         elif self.source == self.Source.GSM:
             valid = self.processGSM(mode, newLocation)
-            if not valid:
-                self.emit("nofix")  # we can only get a single GSM fix, if it isn't valid, we won't get one... ever
+            # We can't be sure to cut the lookup directly short here
+            # "Application might receive MCC fixes before base station
+            # information from external location server is fetched and as a
+            # fallback if e.g. network is temporary unavailable. "
         if valid:            
             self.logger.debug("Emitting GPS fix")
             self.emit("fix", newLocation)
@@ -352,6 +356,7 @@ class GPSWrapper(gobject.GObject):
         return True
     def processGSM(self, mode, newLocation):
         # Ignore cached or country-size measurements
+        # TODO: howto detect MMC lookups? mode seems 2 either way
         if mode < 2:
             return False
             
@@ -482,7 +487,7 @@ class Actor:
         if not connection.connected:
             self.logger.info("Connecting")
             connection.request()
-            self.timeout = gobject.timeout_add(TIMEOUT_GPS * 1000, self._timeout)
+            self.timeout = gobject.timeout_add(TIMEOUT_CONN * 1000, self._timeout)
         else:
             self._success()
         
@@ -518,6 +523,7 @@ class Actor:
             self.logger.info("Attempting GSM lookup")
             self.state = self.State.UPDATING_GSM
             gps.start(GPSWrapper.Source.GSM, GPSWrapper.Aid.INTERNET)
+            self.timeout = gobject.timeout_add(TIMEOUT_GSM * 1000, self._timeout)
         elif self.state == self.State.UPDATING_GSM:
             self.logger.info("GSM lookup failed")
             gps.stop()
@@ -552,6 +558,9 @@ class Actor:
         elif self.state == self.State.UPDATING_GSM:
             self.logger.info("GSM lookup succeeded")
             gps.stop()
+            if self.timeout != None:
+                gobject.source_remove(self.timeout)
+            self.timeout = None
             
             self.pushCache()
             
