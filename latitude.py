@@ -35,6 +35,9 @@ from apiclient.oauth import FlowThreeLegged
 from apiclient.ext.authtools import run
 from apiclient.ext.file import Storage
 
+# Device wrapper
+import osso
+
 # Definitions
 UPDATE_AT_MOST    = 1      # NEVER update more than this (minutes) even when moving
 UPDATE_AT_LEAST   = 15     # NEVER update LESS than this (minutes) even when still (to avoid "stale points" in Latitude)
@@ -115,6 +118,27 @@ class ServiceWrapper:
     def upload(self, entries):
         for entry in entries:
             self.service.location().insert(body = entry.getData()).execute()
+
+class DeviceWrapper(gobject.GObject):
+    # Member data
+    logger = logging.getLogger('DeviceWrapper')
+    context = osso.Context("osso_test_device_on", "0.0.1", False)
+    device = osso.DeviceState(context)
+    
+    # Constructor
+    def __init__(self):
+        gobject.GObject.__init__(self)
+        
+        # Register callbacks
+        self.device.set_device_state_callback(self.cbState)
+    
+    # Events
+    def cbState(shutdown, save_unsaved_data, memory_low, system_inactivity, message):        
+        logger.debug("Shutdown: ", shutdown)
+        logger.debug("Save unsaved data: ", save_unsaved_data)
+        logger.debug("Memory low: ", memory_low)
+        logger.debug("System Inactivity: ", system_inactivity)
+        logger.debug("Message: ", message)
 
 class ConnectionWrapper(gobject.GObject):
     # Signals
@@ -551,6 +575,10 @@ class Actor:
 #
 
 def init():    
+    # Configure the device wrapper
+    global device
+    device = DeviceWrapper()
+    
     # Configure the GPS wrapper
     global gps
     gps = GPSWrapper()
